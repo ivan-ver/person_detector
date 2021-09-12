@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"
+            integrity="sha512-q/dWJ3kcmjBLU4Qc47E4A9kTB4m3wuTY7vkFJDTZKjTs8jhyGQnaUrxa0Ytd0ssMZhbNua9hE+E7Qv1j+DyZwA=="
+            crossorigin="anonymous"></script>
+</head>
+<body>
+<label for="path">Полный путь к видео-файлу</label>
+<input id="path">
+<br/>
+<div>Координаты двух точек, лежащих на границе разделения в процентх от длины и высоты кадра (ось Y смотрит вниз)</div>
+<div>
+    <div>
+        <label for="p1_X">p1 X</label>
+        <input id="p1_X">
+    </div>
+    <div>
+        <label for="p1_Y">p1 Y</label>
+        <input id="p1_Y">
+    </div>
+    <div>
+        <label for="p2_X">p2 X</label>
+        <input id="p2_X">
+    </div>
+    <div>
+        <label for="p2_Y">p2 Y</label>
+        <input id="p2_Y">
+    </div>
+</div>
+<button id="send" onclick="send()">OK</button>
+<script type="text/javascript" charset="utf-8">
+    let socket = io()
+    socket.on('connect', () => {
+        console.log('I\'m connected!')
+        socket.emit('on_connect', {data: 'I\'m connected!'});
+    })
+    socket.on('message', (msg) => {
+        console.log(msg)
+    })
+    let send = () => {
+        let path = document.getElementById("path").value
+        let x1 = document.getElementById("p1_X").value
+        let y1 = document.getElementById("p1_Y").value
+        let x2 = document.getElementById("p2_X").value
+        let y2 = document.getElementById("p2_Y").value
+        socket.emit('load_data', {
+            path: path,
+            x1: x1,
+            y1: y1,
+            x2: x2,
+            y2: y2,
+        })
+    }
+</script>
+</body>
+</html>

@@ -5,6 +5,25 @@ import numpy as np
 from scipy.spatial import distance as dist
 
 
+class Border:
+    a_x = None
+    a_y = None
+    b_x = None
+    b_y = None
+
+    def __init__(self, a_x, a_y, b_x, b_y, video_path):
+        cap = cv2.VideoCapture(video_path)
+        _, frame = cap.read()
+        height, width, channels = frame.shape
+        self.a_x = int(a_x / 100 * width)
+        self.a_y = int(a_y / 100 * height)
+        self.b_x = int(b_x / 100 * width)
+        self.b_y = int(b_y / 100 * height)
+
+    def check(self, x, y):
+        return (self.b_x - self.a_x) * (y - self.a_y) - (self.b_y - self.a_y) * (x - self.a_x) > 0
+
+
 class CentroidTracker:
     def __init__(self, maxDisappeared=50):
         self.start_coords = None
@@ -13,8 +32,8 @@ class CentroidTracker:
         self.max_disappeared = maxDisappeared
 
     def register(self, centroid):
-        self.objects[centroid[5]] = centroid
-        self.disappeared[centroid[5]] = 0
+        self.objects[str(centroid[2]) + "_" + str(centroid[3])] = centroid
+        self.disappeared[str(centroid[2]) + "_" + str(centroid[3])] = 0
 
     def deregister(self, object_id):
         del self.objects[object_id]
@@ -65,105 +84,116 @@ class CentroidTracker:
         return self.objects
 
 
-def show_video():
-    border_y = 730
+def load_yolo():
+    net = cv2.dnn.readNet('yolo_cfg/yolov3.weights', 'yolo_cfg/yolov3.cfg')
+    with open("yolo_cfg/coco.names", "r") as f:
+        classes = [line.strip() for line in f.readlines()]
+    layers_names = net.getLayerNames()
+    output_layers = [layers_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+    colors = np.random.uniform(0, 255, size=(len(classes), 3))
+    return net, classes, colors, output_layers
+
+
+def detect_objects(img, net, outputLayers):
+    blob = cv2.dnn.blobFromImage(img, scalefactor=0.00392, size=(320, 320), mean=(0, 0, 0), swapRB=True, crop=False)
+    net.setInput(blob)
+    outputs = net.forward(outputLayers)
+    return blob, outputs
+
+
+def get_box_dimensions(outputs, height, width):
+    boxes = []
+    confs = []
+    for output in outputs:
+        for detect in output:
+            scores = detect[5:]
+            class_id = np.argmax(scores)
+            conf = scores[class_id]
+            if conf > 0.1 and class_id == 0:
+                center_x = int(detect[0] * width)
+                center_y = int(detect[1] * height)
+                w = int(detect[2] * width)
+                h = int(detect[3] * height)
+                x = int(center_x - w / 2)
+                y = int(center_y - h / 2)
+                boxes.append([x, y, w, h])
+                confs.append(float(conf))
+    return boxes, confs
+
+
+def draw_labels(boxes, confs, img, tracker, input_total, output_total, border, out_stream):
+    indexes = cv2.dnn.NMSBoxes(boxes, confs, 0.5, 0.5)
+    objects = list()
+    for i in range(len(boxes)):
+        if i in indexes:
+            objects.append(boxes[i])
+    objects = tracker.update(objects)
+    for (object_id, centroid) in objects.items():
+
+        if (border.check(x=int(object_id.split('_')[0]), y=int(object_id.split('_')[1]))) and (
+                not border.check(x=centroid[2] + centroid[4], y=centroid[3] + centroid[5])):
+
+            cv2.rectangle(img, (round(centroid[2]), round(centroid[3])),
+                          (round(centroid[2] + 65), round(centroid[3] - 20)), (0, 0, 255), - 1)
+            cv2.putText(img, f"ID {format(object_id.split('_')[0])}", (centroid[2], centroid[3] - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 255, 255), 1)
+            cv2.rectangle(img, (round(centroid[2]), round(centroid[3])),
+                          (round(centroid[2] + centroid[4]), round(centroid[3] + centroid[5])), (0, 0, 255), 1)
+            output_total.add(object_id)
+
+        elif (not border.check(x=int(object_id.split('_')[0]), y=int(object_id.split('_')[1]))) and (
+                border.check(x=centroid[2] + centroid[4], y=centroid[3] + centroid[5])):
+
+            cv2.rectangle(img, (round(centroid[2]), round(centroid[3])),
+                          (round(centroid[2] + 65), round(centroid[3] - 20)), (0, 255, 0), - 1)
+            cv2.putText(img, f"ID {format(object_id.split('_')[0])}", (centroid[2], centroid[3] - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 0, 0), 1)
+            cv2.rectangle(img, (round(centroid[2]), round(centroid[3])),
+                          (round(centroid[2] + centroid[4]), round(centroid[3] + centroid[5])), (0, 255, 0), 1)
+            input_total.add(object_id)
+        else:
+            cv2.rectangle(img, (round(centroid[2]), round(centroid[3])),
+                          (round(centroid[2] + 65), round(centroid[3] - 20)), (255, 0, 0), - 1)
+            cv2.putText(img, f"ID {format(object_id.split('_')[0])}", (centroid[2], centroid[3] - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 255, 255), 1)
+            cv2.rectangle(img, (round(centroid[2]), round(centroid[3])),
+                          (round(centroid[2] + centroid[4]), round(centroid[3] + centroid[5])), (255, 0, 0), 1)
+
+    cv2.line(img=img, pt1=(border.a_x, border.a_y), pt2=(border.b_x, border.b_y), color=(125, 32, 0), thickness=2)
+    cv2.rectangle(img, (0, 0), (200, 60), (0, 255, 0), - 1)
+    cv2.putText(img, f"INPUT: {len(input_total)}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    cv2.rectangle(img, (0, 60), (200, 120), (0, 0, 255), - 1)
+    cv2.putText(img, f"OUTPUT: {len(output_total)}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.imshow("Image", img)
+    out_stream.write(img)
+
+
+def start_video(video_path, tracker, border):
     input_total = set()
     output_total = set()
-    tracker = CentroidTracker()
-    net = cv2.dnn.readNet('weights/yolov3.weights', 'weights/yolov3.cfg')
-    cap = cv2.VideoCapture("video_2.mp4")
+    model, classes, colors, output_layers = load_yolo()
+    cap = cv2.VideoCapture(video_path)
     fourcc = cv2.VideoWriter_fourcc(*"MJPG")
     out_stream = cv2.VideoWriter('output.avi', fourcc, 30, (1920, 1080))
 
     while True:
         ret, frame = cap.read()
-        if ret:
-            # frame = cv2.resize(frame, None, fx=0.7, fy=0.7)
-
-            net.setInput(cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False))
-            layer_names = net.getLayerNames()
-            output_layers = [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
-            outs = net.forward(output_layers)
-
-            class_ids = []
-            confidences = []
-            boxes = []
-            Width = frame.shape[1]
-            Height = frame.shape[0]
-
-            for out in outs:
-                for detection in out:
-                    scores = detection[5:]
-                    class_id = np.argmax(scores)
-                    confidence = scores[class_id]
-                    if confidence > 0.5:
-                        center_x = int(detection[0] * Width)
-                        center_y = int(detection[1] * Height)
-                        w = int(detection[2] * Width)
-                        h = int(detection[3] * Height)
-                        x = center_x - w / 2
-                        y = center_y - h / 2
-                        class_ids.append(class_id)
-                        confidences.append(float(confidence))
-                        boxes.append([x, y, w, h])
-
-            indices = cv2.dnn.NMSBoxes(boxes, confidences, 0.1, 0.1)
-            objs = []
-
-            for i in indices:
-                i = i[0]
-                box = boxes[i]
-                if class_ids[i] == 0:
-                    objs.append((box[0], box[1], box[0] + box[2], box[1] + box[3]))
-
-            objects = tracker.update(objs)
-
-            for i, (object_id, centroid) in enumerate(objects.items()):
-                if (object_id > border_y) and (centroid[5] < border_y):
-                    cv2.rectangle(frame, (round(centroid[2]), round(centroid[3])),
-                                  (round(centroid[2] + 55), round(centroid[3] - 20)), (0, 0, 255), - 1)
-                    cv2.putText(frame, f"ID {format(object_id)}", (centroid[2], centroid[3] - 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                    cv2.rectangle(frame, (round(centroid[2]), round(centroid[3])),
-                                  (round(centroid[4]), round(centroid[5])),
-                                  (0, 0, 255), 1)
-                    input_total.add(object_id)
-                elif (object_id < border_y) and (centroid[5] > border_y):
-                    cv2.rectangle(frame, (round(centroid[2]), round(centroid[3])),
-                                  (round(centroid[2] + 55), round(centroid[3] - 20)), (0, 255, 0), - 1)
-                    cv2.putText(frame, f"ID {format(object_id)}", (centroid[2], centroid[3] - 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-                    cv2.rectangle(frame, (round(centroid[2]), round(centroid[3])),
-                                  (round(centroid[4]), round(centroid[5])),
-                                  (0, 255, 0), 1)
-                    output_total.add(object_id)
-                else:
-                    cv2.rectangle(frame, (round(centroid[2]), round(centroid[3])),
-                                  (round(centroid[2] + 55), round(centroid[3] - 20)), (255, 0, 0), - 1)
-                    cv2.putText(frame, f"ID {format(object_id)}", (centroid[2], centroid[3] - 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                    cv2.rectangle(frame, (round(centroid[2]), round(centroid[3])),
-                                  (round(centroid[4]), round(centroid[5])),
-                                  (255, 0, 0), 1)
-
-
-            cv2.line(img=frame, pt1=(0, border_y), pt2=(1920, border_y), color=(125, 32, border_y), thickness=2)
-            cv2.rectangle(frame, (0, 0), (200, 60), (0, 255, 0), - 1)
-            cv2.putText(frame, f"INPUT: {len(input_total)}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
-            cv2.rectangle(frame, (0, 60), (200, 120), (0, 0, 255), - 1)
-            cv2.putText(frame, f"OUTPUT: {len(output_total)}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-
-            cv2.imshow('frame', frame)
-            out_stream.write(frame)
-
-            if cv2.waitKey(1) == ord('q'):
-                break
-        else:
+        height, width, channels = frame.shape
+        blob, outputs = detect_objects(frame, model, output_layers)
+        boxes, confs = get_box_dimensions(outputs, height, width)
+        draw_labels(boxes=boxes, confs=confs, img=frame, tracker=tracker, output_total=output_total,
+                    input_total=input_total, border=border, out_stream=out_stream)
+        key = cv2.waitKey(1)
+        if key == 27 or not ret:
             break
+
     cap.release()
-    out_stream.release()
-    cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
-    show_video()
+    tracker = CentroidTracker()
+    border = Border(a_x=0, a_y=250, b_x=1920, b_y=650)
+    start_video('video_2.mp4', tracker=tracker, border=border)
